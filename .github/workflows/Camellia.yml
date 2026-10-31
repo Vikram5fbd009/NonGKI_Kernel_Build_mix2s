@@ -16,6 +16,7 @@ env:
   GENERATE_CHIP: "mediatek"
   BUILD_DEBUGGER: "false"
   BUILD_OTHER_CONFIG: "false"
+  # ===== camellia_flyme.env values =====
   DEVICE_NAME: "xiaomi_camellia"
   DEVICE_CODENAME: "camellia"
   CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
@@ -60,9 +61,10 @@ jobs:
         run: |
           if [ -d "$GITHUB_WORKSPACE/Patches" ]; then
             mv "$GITHUB_WORKSPACE/Patches" /tmp/Patches
-            echo "✓ Patches moved to /tmp/Patches"
+            echo "Patches moved to /tmp/Patches"
+            ls /tmp/Patches
           else
-            echo "❌ ERROR: Patches/ folder missing in your repo!"
+            echo "ERROR: Patches/ folder missing in your repo!"
             exit 1
           fi
 
@@ -71,17 +73,7 @@ jobs:
           pacman -Syyu --noconfirm
           pacman -S git base-devel systemd patch ccache automake flex lzop bison gperf zip curl bzip2 squashfs-tools pngcrush schedtool make optipng maven pwgen minicom bc unzip 7zip zstd binutils gcc python3 wget which --noconfirm
 
-      - name: Install GNU GCC
-        if: env.GCC_GNU == 'true'
-        run: |
-          if [ -z "${{ env.GCC_64_SOURCE }}" ] && [ -z "${{ env.GCC_32_SOURCE }}" ]; then
-            pacman -S aarch64-linux-gnu-binutils aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc aarch64-linux-gnu-linux-api-headers --noconfirm
-            pacman -S arm-none-eabi-binutils arm-none-eabi-gcc --noconfirm
-            echo "GCC_64=CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-            echo "GCC_32=CROSS_COMPILE_ARM32=arm-none-eabi-" >> $GITHUB_ENV
-          fi
-
-      - name: Set Compile Environment (GCC + Clang)
+      - name: Set Compile Environment (GCC + Clang, with auto-detect)
         run: |
           cd $GITHUB_WORKSPACE
 
@@ -107,7 +99,7 @@ jobs:
             echo "GCC_32=CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc-32/bin/$GCC_32_BIN" >> $GITHUB_ENV
           fi
 
-          # ---------- Clang (FIX: android.googlesource.com URL भी हैंडल करो) ----------
+          # ---------- Clang ----------
           CLANG_SRC="${{ env.CLANG_SOURCE }}"
           if [ -z "$CLANG_SRC" ]; then
             echo "Not set Clang!"
@@ -131,13 +123,38 @@ jobs:
             bash antman -S
             cd ..
           else
-            # Default: treat as git repo (यहाँ .git न होने पर भी काम करेगा)
             git clone "$CLANG_SRC" -b "${{ env.CLANG_BRANCH }}" clang-custom --depth=1
           fi
 
-          echo "$GITHUB_WORKSPACE/clang-custom/bin" >> $GITHUB_PATH
-          echo "=== Clang tree ==="
-          ls -la $GITHUB_WORKSPACE/clang-custom/bin/ 2>/dev/null | head -30 || true
+          # ---- AUTO-DETECT असली clang bin directory ----
+          echo "=== clang-custom tree (top) ==="
+          ls -la $GITHUB_WORKSPACE/clang-custom/ | head -20 || true
+
+          if [ -x "$GITHUB_WORKSPACE/clang-custom/bin/clang" ]; then
+            CLANG_BIN="$GITHUB_WORKSPACE/clang-custom/bin"
+          else
+            # clang-rXXXXXX/bin/ खोजो
+            CLANG_BIN=$(find "$GITHUB_WORKSPACE/clang-custom" -maxdepth 2 -type d -name bin 2>/dev/null | grep -E 'clang-r[0-9a-f]+/bin$' | head -1)
+            if [ -z "$CLANG_BIN" ]; then
+              CLANG_BIN=$(find "$GITHUB_WORKSPACE/clang-custom" -maxdepth 3 -type f -name clang 2>/dev/null | head -1 | xargs -r dirname)
+            fi
+          fi
+
+          echo "Detected CLANG_BIN=$CLANG_BIN"
+
+          if [ -x "$CLANG_BIN/clang" ]; then
+            echo "Using prebuilt clang at $CLANG_BIN"
+            echo "$CLANG_BIN" >> $GITHUB_PATH
+            echo "CLANG_BIN_DIR=$CLANG_BIN" >> $GITHUB_ENV
+            "$CLANG_BIN/clang" --version | head -2
+            if [ ! -x "$CLANG_BIN/ld.lld" ]; then
+              echo "ld.lld not found in clang bin — installing lld package"
+              pacman -S --noconfirm lld
+            fi
+          else
+            echo "No prebuilt clang found — installing system clang + lld as fallback"
+            pacman -S --noconfirm clang lld llvm
+          fi
 
       - name: Get Kernel Source
         run: |
@@ -151,7 +168,7 @@ jobs:
 
           KVER=$(head -n 3 device_kernel/Makefile | grep -E 'VERSION|PATCHLEVEL' | awk '{print $3}' | paste -sd '.')
           echo "KERNEL_VERSION=$KVER" >> $GITHUB_ENV
-          echo "✅ Detected KERNEL_VERSION=$KVER"
+          echo "Detected KERNEL_VERSION=$KVER"
 
       - name: Set KSU and SUSFS for DEFCONFIG
         run: |
@@ -284,7 +301,7 @@ jobs:
           patch -p1 < 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch || true
 
           if [[ "${{ env.KERNELSU_NAME }}" == "KernelSU-Next" ]]; then
-            echo "KernelSU-Next detected, skipping sus patch."
+            echo "KernelSU-Next detected, skipping KSU sus patch."
           elif [[ "${{ env.KERNELSU_SUS_PATCH }}" == "true" ]]; then
             cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./${{ env.KERNELSU_NAME }}
             cd ${{ env.KERNELSU_NAME }}
@@ -320,7 +337,6 @@ jobs:
             echo "Fixed patch $PATCH_FILE not found in NonGKI_Kernel_Patches, skipping."
           fi
 
-      # ⚠️ ccache-action को SUSFS/Fix पैच के बाद रखें, ताकि clang-custom मौजूद हो
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -330,15 +346,23 @@ jobs:
 
       - name: Build Kernel
         run: |
-          export PATH=$GITHUB_WORKSPACE/clang-custom/bin:$PATH
+          # असली clang bin को फिर से PATH में डालो (prebuilt या system)
+          if [ -n "${{ env.CLANG_BIN_DIR }}" ] && [ -x "${{ env.CLANG_BIN_DIR }}/clang" ]; then
+            export PATH="${{ env.CLANG_BIN_DIR }}:$PATH"
+          else
+            # system clang fallback — सीधे /usr/bin में है
+            export PATH="/usr/bin:$PATH"
+          fi
+
           cd $GITHUB_WORKSPACE/device_kernel/
 
           echo "=== Sanity check ==="
           echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-          echo "which clang: $(which clang || echo MISSING)"
-          echo "which ld.lld: $(which ld.lld || echo MISSING)"
-          clang --version || true
-          ls -la $GITHUB_WORKSPACE/clang-custom/bin/ 2>/dev/null | head -5 || true
+          echo "PATH=$PATH"
+          echo "which clang: $(command -v clang || echo MISSING)"
+          echo "which ld.lld: $(command -v ld.lld || echo MISSING)"
+          clang --version 2>&1 | head -3 || true
+          ld.lld --version 2>&1 | head -2 || true
 
           echo "Building kernel ${{ env.KERNEL_VERSION }} for ${{ env.DEVICE_NAME }}"
           make O=out ARCH=arm64 \
