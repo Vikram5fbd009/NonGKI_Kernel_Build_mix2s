@@ -111,33 +111,34 @@ jobs:
           cd $GITHUB_WORKSPACE/device_kernel
           DEFCONFIG=./arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
 
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
-            echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
-            echo "# CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $DEFCONFIG
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
-          fi
-
-          echo "CONFIG_EXFAT_FS=y" >> $DEFCONFIG
-          echo "CONFIG_NTFS3_FS=y" >> $DEFCONFIG
-          echo "CONFIG_F2FS_FS=y" >> $DEFCONFIG
-          echo "CONFIG_EXT4_FS=y" >> $DEFCONFIG
-          echo "CONFIG_VFAT_FS=y" >> $DEFCONFIG
-          echo "CONFIG_MSDOS_FS=y" >> $DEFCONFIG
-          echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
-          echo 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"' >> $DEFCONFIG
-          echo "CONFIG_MEDIA_SUPPORT=y" >> $DEFCONFIG
-          echo "CONFIG_VIDEO_DEV=y" >> $DEFCONFIG
+          {
+            echo "CONFIG_KSU=y"
+            if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "# CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set"
+              echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+              echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+              echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            fi
+            echo "CONFIG_EXFAT_FS=y"
+            echo "CONFIG_NTFS3_FS=y"
+            echo "CONFIG_F2FS_FS=y"
+            echo "CONFIG_EXT4_FS=y"
+            echo "CONFIG_VFAT_FS=y"
+            echo "CONFIG_MSDOS_FS=y"
+            echo "CONFIG_ANDROID_BINDER_IPC=y"
+            echo 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"'
+            echo "CONFIG_MEDIA_SUPPORT=y"
+            echo "CONFIG_VIDEO_DEV=y"
+          } >> $DEFCONFIG
 
       - name: KernelSU + SUSFS + AnyKernel3
         run: |
@@ -207,45 +208,73 @@ jobs:
           fi
 
       # ============================================================
-      # 🎯 FIX 1: fs/stat.c — dono includes (susfs.h + susfs_def.h) ensure
+      # 🎯 FIX 0: Ensure kernel/Kconfig is sourced (CRITICAL for CONFIG_KSU_SUSFS)
+      # ============================================================
+      - name: Fix Kconfig sourcing (ensure SUSFS config is visible)
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel/
+
+          # If SUSFS patch created kernel/Kconfig but no one sources it, add source
+          if [ -f kernel/Kconfig ] && grep -q "KSU_SUSFS" kernel/Kconfig; then
+            if ! grep -q 'source "kernel/Kconfig"' Kconfig 2>/dev/null; then
+              echo "→ Adding 'source kernel/Kconfig' to top-level Kconfig"
+              echo '' >> Kconfig
+              echo 'source "kernel/Kconfig"' >> Kconfig
+            else
+              echo "✓ kernel/Kconfig already sourced in top-level Kconfig"
+            fi
+          else
+            echo "→ kernel/Kconfig not found or no KSU_SUSFS, checking other locations..."
+            # Try to find where the SUSFS patch put the config
+            SUSFS_KCONFIG=$(grep -rl "menuconfig KSU_SUSFS\|config KSU_SUSFS" --include="Kconfig*" . 2>/dev/null | head -1)
+            if [ -n "$SUSFS_KCONFIG" ]; then
+              echo "✓ SUSFS config found in: $SUSFS_KCONFIG"
+              # Check if it's sourced
+              DIR=$(dirname "$SUSFS_KCONFIG")
+              BASE=$(basename "$SUSFS_KCONFIG")
+              if [ "$DIR" != "." ] && ! grep -q "source \"$SUSFS_KCONFIG\"" Kconfig 2>/dev/null; then
+                echo "→ Not sourced, adding to top-level Kconfig"
+                echo "source \"$SUSFS_KCONFIG\"" >> Kconfig
+              fi
+            else
+              echo "✗ WARNING: SUSFS Kconfig not found anywhere!"
+            fi
+          fi
+
+          echo ""
+          echo "=== Kconfig verification ==="
+          grep -rn "KSU_SUSFS" --include="Kconfig*" . | head -10 || true
+
+      # ============================================================
+      # 🎯 FIX 1: fs/stat.c — unconditional includes + stubs
       # ============================================================
       - name: Fix fs/stat.c (build error) with pure shell
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
 
           if grep -q "susfs_is_current_app_uid\|STATX_SUS_KSTAT" fs/stat.c 2>/dev/null; then
-            NEEDS_INJECT=0
-            if ! grep -q '<linux/susfs.h>' fs/stat.c; then
-              NEEDS_INJECT=1
-            fi
-            if ! grep -q '<linux/susfs_def.h>' fs/stat.c; then
-              NEEDS_INJECT=1
-            fi
+            # Remove old guarded includes
+            grep -v '<linux/susfs.h>' fs/stat.c > fs/stat.c.tmp1 || true
+            grep -v '<linux/susfs_def.h>' fs/stat.c.tmp1 > fs/stat.c.tmp2 || true
+            rm -f fs/stat.c.tmp1
 
-            if [ "$NEEDS_INJECT" -eq 1 ]; then
-              # Purani SUSFS include lines hatao (duplicate na bane)
-              grep -v '<linux/susfs.h>' fs/stat.c > fs/stat.c.tmp1 || true
-              grep -v '<linux/susfs_def.h>' fs/stat.c.tmp1 > fs/stat.c.tmp2 || true
-              rm -f fs/stat.c.tmp1
+            LAST_INC=$(grep -n '^#include' fs/stat.c.tmp2 | tail -1 | cut -d: -f1)
+            if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
 
-              LAST_INC=$(grep -n '^#include' fs/stat.c.tmp2 | tail -1 | cut -d: -f1)
-              if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
-
-              {
-                head -n "$LAST_INC" fs/stat.c.tmp2
-                echo ""
-                echo "#ifdef CONFIG_KSU_SUSFS"
-                echo "#include <linux/susfs.h>"
-                echo "#include <linux/susfs_def.h>"
-                echo "#endif"
-                tail -n +$((LAST_INC + 1)) fs/stat.c.tmp2
-              } > fs/stat.c.new
-              rm -f fs/stat.c.tmp2
-              mv fs/stat.c.new fs/stat.c
-              echo "[stat.c] SUSFS includes freshly injected (susfs.h + susfs_def.h)"
-            else
-              echo "[stat.c] SUSFS includes already present (both)"
-            fi
+            {
+              head -n "$LAST_INC" fs/stat.c.tmp2
+              echo ""
+              echo "/* SUSFS - unconditional includes + fallback stubs */"
+              echo "#include <linux/susfs.h>"
+              echo "#include <linux/susfs_def.h>"
+              echo "#ifndef CONFIG_KSU_SUSFS"
+              echo "static inline bool susfs_is_current_app_uid(void) { return false; }"
+              echo "#endif"
+              tail -n +$((LAST_INC + 1)) fs/stat.c.tmp2
+            } > fs/stat.c.new
+            rm -f fs/stat.c.tmp2
+            mv fs/stat.c.new fs/stat.c
+            echo "[stat.c] Unconditional susfs includes + stubs injected"
           else
             echo "[stat.c] No susfs code, skipping"
           fi
@@ -265,23 +294,18 @@ jobs:
             fi
           fi
 
-          if grep -q "DEFAULT_KSU_MNT_MINOR_DEV" fs/super.c 2>/dev/null && ! grep -q "#define DEFAULT_KSU_MNT_MINOR_DEV" fs/super.c; then
-            sed -i '1i #ifndef DEFAULT_KSU_MNT_MINOR_DEV' fs/super.c
-            sed -i '2i #define DEFAULT_KSU_MNT_MINOR_DEV 234' fs/super.c
-            sed -i '3i #endif' fs/super.c
-          fi
-          if grep -q "DEFAULT_KSU_MNT_MINOR_DEV" fs/namespace.c 2>/dev/null && ! grep -q "#define DEFAULT_KSU_MNT_MINOR_DEV" fs/namespace.c; then
-            sed -i '1i #ifndef DEFAULT_KSU_MNT_MINOR_DEV' fs/namespace.c
-            sed -i '2i #define DEFAULT_KSU_MNT_MINOR_DEV 234' fs/namespace.c
-            sed -i '3i #endif' fs/namespace.c
-          fi
+          for f in fs/super.c fs/namespace.c; do
+            if [ -f "$f" ] && grep -q "DEFAULT_KSU_MNT_MINOR_DEV" "$f" && ! grep -q "#define DEFAULT_KSU_MNT_MINOR_DEV" "$f"; then
+              sed -i '1i #ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV 234\n#endif' "$f"
+              echo "[$f] DEFAULT_KSU_MNT_MINOR_DEV defined"
+            fi
+          done
 
           echo "=== Verify stat.c ==="
-          grep -n "susfs.h\|susfs_def.h" fs/stat.c | head -5 || true
-          grep -n "STATX_SUS_KSTAT" include/linux/susfs_def.h | head -5 || true
+          grep -n "susfs.h\|susfs_def.h\|CONFIG_KSU_SUSFS" fs/stat.c | head -10 || true
 
       # ============================================================
-      # 🎯 FIX 2: fs/readdir.c — FUSE_SUPER_MAGIC + susfs funcs + inode decl
+      # 🎯 FIX 2: fs/readdir.c — FUSE_SUPER_MAGIC + susfs stubs + inode decl
       # ============================================================
       - name: Fix fs/readdir.c (build error) with pure shell
         run: |
@@ -292,41 +316,49 @@ jobs:
             exit 0
           fi
 
-          # ---- 1) Add #include <linux/magic.h> (for FUSE_SUPER_MAGIC) ----
+          # ---- 1) Inject FUSE_SUPER_MAGIC fallback + magic.h ----
           if grep -q "FUSE_SUPER_MAGIC" fs/readdir.c && ! grep -q 'linux/magic\.h' fs/readdir.c; then
             LAST_INC=$(grep -n '^#include' fs/readdir.c | tail -1 | cut -d: -f1)
             if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
             {
               head -n "$LAST_INC" fs/readdir.c
               echo "#include <linux/magic.h>"
-              tail -n +$((LAST_INC + 1)) fs/readdir.c
-            } > fs/readdir.c.new
-            mv fs/readdir.c.new fs/readdir.c
-            echo "[readdir.c] Injected #include <linux/magic.h>"
-          else
-            echo "[readdir.c] magic.h OK or FUSE_SUPER_MAGIC not used"
-          fi
-
-          # ---- 2) Add #include <linux/susfs.h> ----
-          if grep -q "susfs_is_inode_sus_path\|susfs_get_data_path" fs/readdir.c && ! grep -q 'linux/susfs\.h' fs/readdir.c; then
-            LAST_INC=$(grep -n '^#include' fs/readdir.c | tail -1 | cut -d: -f1)
-            if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
-            {
-              head -n "$LAST_INC" fs/readdir.c
-              echo "#ifdef CONFIG_KSU_SUSFS"
-              echo "#include <linux/susfs.h>"
+              echo "#ifndef FUSE_SUPER_MAGIC"
+              echo "#define FUSE_SUPER_MAGIC 0x65735546"
               echo "#endif"
               tail -n +$((LAST_INC + 1)) fs/readdir.c
             } > fs/readdir.c.new
             mv fs/readdir.c.new fs/readdir.c
-            echo "[readdir.c] Injected #include <linux/susfs.h>"
-          else
-            echo "[readdir.c] susfs.h OK or susfs funcs not used"
+            echo "[readdir.c] magic.h + FUSE_SUPER_MAGIC fallback injected"
           fi
 
-          # ---- 3) Insert "struct inode *inode;" before every unguarded "inode = ilookup(...)" ----
+          # ---- 2) Unconditional susfs.h + stubs ----
+          if grep -q "susfs_is_inode_sus_path\|susfs_get_data_path" fs/readdir.c; then
+            # Remove any guarded includes
+            grep -v '<linux/susfs.h>' fs/readdir.c > fs/readdir.c.tmp1 || true
+
+            LAST_INC=$(grep -n '^#include' fs/readdir.c.tmp1 | tail -1 | cut -d: -f1)
+            if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
+
+            {
+              head -n "$LAST_INC" fs/readdir.c.tmp1
+              echo ""
+              echo "/* SUSFS - unconditional include + fallback stubs */"
+              echo "#include <linux/susfs.h>"
+              echo "#ifndef CONFIG_KSU_SUSFS"
+              echo "static inline bool susfs_is_inode_sus_path(struct inode *inode) { return false; }"
+              echo "static inline int susfs_get_data_path(struct path *path) { return 0; }"
+              echo "#endif"
+              tail -n +$((LAST_INC + 1)) fs/readdir.c.tmp1
+            } > fs/readdir.c.new
+            rm -f fs/readdir.c.tmp1
+            mv fs/readdir.c.new fs/readdir.c
+            echo "[readdir.c] Unconditional susfs.h + stubs injected"
+          fi
+
+          # ---- 3) Insert struct inode declaration ----
           python3 - <<'PYEOF'
-          import re, sys
+          import re
 
           path = 'fs/readdir.c'
           with open(path) as f:
@@ -353,17 +385,11 @@ jobs:
 
           with open(path, 'w') as f:
               f.writelines(out)
-
           print(f'[readdir.c] Total insertions: {inserted}')
           PYEOF
 
-          # ---- Verify ----
           echo "=== Verify readdir.c ==="
-          grep -n "linux/magic.h\|linux/susfs.h" fs/readdir.c | head -5 || true
-          echo "--- struct inode decl count ---"
-          grep -c "struct inode \*inode" fs/readdir.c || true
-          echo "--- ilookup occurrences ---"
-          grep -n "inode = ilookup" fs/readdir.c || true
+          grep -n "linux/magic.h\|linux/susfs.h\|FUSE_SUPER_MAGIC" fs/readdir.c | head -10 || true
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -379,6 +405,7 @@ jobs:
 
           KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined"
 
+          # Generate defconfig
           make O=out ARCH=arm64 \
                CC="ccache clang" LD="ld.lld" \
                CLANG_TRIPLE="aarch64-linux-gnu-" \
@@ -386,6 +413,29 @@ jobs:
                CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
                KCFLAGS="$KCFLAGS_FIX" \
                ${{ env.DEFCONFIG_NAME }}
+
+          # 🔍 VERIFY SUSFS CONFIG LANDED IN .config
+          echo "============= SUSFS CONFIG CHECK ============="
+          if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+            echo "✅ CONFIG_KSU_SUSFS=y found in .config"
+            grep "^CONFIG_KSU_SUSFS" out/.config
+          else
+            echo "❌ CONFIG_KSU_SUSFS NOT in .config - forcing it"
+            # Force through scripts/config (writes raw line; if Kconfig is right, it will be picked up)
+            for opt in KSU_SUSFS KSU_SUSFS_HAS_MAGIC_MOUNT KSU_SUSFS_SUS_PATH KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT; do
+              echo "CONFIG_$opt=y" >> out/.config
+            done
+            # Run olddefconfig to regenerate auto.conf
+            make O=out ARCH=arm64 olddefconfig
+            # Re-check
+            if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+              echo "✅ CONFIG_KSU_SUSFS now set after force"
+            else
+              echo "⚠️ CONFIG_KSU_SUSFS STILL missing — SUSFS may not work at runtime"
+              echo "Kconfig tree may not include SUSFS symbols. Build will still succeed via stubs."
+            fi
+          fi
+          echo "=============================================="
 
           make -j$(nproc --all) O=out ARCH=arm64 \
                CC="ccache clang" LD="ld.lld" \
