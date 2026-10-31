@@ -16,7 +16,6 @@ env:
   GENERATE_CHIP: "mediatek"
   BUILD_DEBUGGER: "false"
   BUILD_OTHER_CONFIG: "false"
-  # ===== camellia_flyme.env values =====
   DEVICE_NAME: "xiaomi_camellia"
   DEVICE_CODENAME: "camellia"
   CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
@@ -73,7 +72,7 @@ jobs:
           pacman -Syyu --noconfirm
           pacman -S git base-devel systemd patch ccache automake flex lzop bison gperf zip curl bzip2 squashfs-tools pngcrush schedtool make optipng maven pwgen minicom bc unzip 7zip zstd binutils gcc python3 wget which --noconfirm
 
-      - name: Set Compile Environment (GCC + Clang, with auto-detect)
+      - name: Set Compile Environment (GCC + Clang, auto-detect)
         run: |
           cd $GITHUB_WORKSPACE
 
@@ -104,36 +103,21 @@ jobs:
           if [ -z "$CLANG_SRC" ]; then
             echo "Not set Clang!"
           elif [[ "$CLANG_SRC" == *".tar.gz" ]]; then
-            wget -O clang.tar.gz "$CLANG_SRC"
-            mkdir -p clang-custom
-            tar -C clang-custom/ -zxvf clang.tar.gz
+            wget -O clang.tar.gz "$CLANG_SRC"; mkdir -p clang-custom; tar -C clang-custom/ -zxvf clang.tar.gz
           elif [[ "$CLANG_SRC" == *".tar.xz" ]]; then
-            wget -O clang.tar.xz "$CLANG_SRC"
-            mkdir -p clang-custom
-            tar -C clang-custom/ -xvf clang.tar.xz --strip-components 1
+            wget -O clang.tar.xz "$CLANG_SRC"; mkdir -p clang-custom; tar -C clang-custom/ -xvf clang.tar.xz --strip-components 1
           elif [[ "$CLANG_SRC" == *".zip" ]]; then
-            wget -O clang.zip "$CLANG_SRC"
-            mkdir -p clang-custom
-            unzip -q clang.zip -d clang-custom/
+            wget -O clang.zip "$CLANG_SRC"; mkdir -p clang-custom; unzip -q clang.zip -d clang-custom/
           elif [[ "$CLANG_SRC" == *"antman" ]]; then
-            mkdir -p clang-custom
-            cd clang-custom
-            wget "$CLANG_SRC" -O antman
-            chmod +x antman
-            bash antman -S
-            cd ..
+            mkdir -p clang-custom; cd clang-custom; wget "$CLANG_SRC" -O antman; chmod +x antman; bash antman -S; cd ..
           else
             git clone "$CLANG_SRC" -b "${{ env.CLANG_BRANCH }}" clang-custom --depth=1
           fi
 
-          # ---- AUTO-DETECT असली clang bin directory ----
-          echo "=== clang-custom tree (top) ==="
-          ls -la $GITHUB_WORKSPACE/clang-custom/ | head -20 || true
-
+          # AUTO-DETECT real clang bin
           if [ -x "$GITHUB_WORKSPACE/clang-custom/bin/clang" ]; then
             CLANG_BIN="$GITHUB_WORKSPACE/clang-custom/bin"
           else
-            # clang-rXXXXXX/bin/ खोजो
             CLANG_BIN=$(find "$GITHUB_WORKSPACE/clang-custom" -maxdepth 2 -type d -name bin 2>/dev/null | grep -E 'clang-r[0-9a-f]+/bin$' | head -1)
             if [ -z "$CLANG_BIN" ]; then
               CLANG_BIN=$(find "$GITHUB_WORKSPACE/clang-custom" -maxdepth 3 -type f -name clang 2>/dev/null | head -1 | xargs -r dirname)
@@ -141,18 +125,16 @@ jobs:
           fi
 
           echo "Detected CLANG_BIN=$CLANG_BIN"
-
           if [ -x "$CLANG_BIN/clang" ]; then
-            echo "Using prebuilt clang at $CLANG_BIN"
+            echo "✅ Using prebuilt clang at $CLANG_BIN"
             echo "$CLANG_BIN" >> $GITHUB_PATH
             echo "CLANG_BIN_DIR=$CLANG_BIN" >> $GITHUB_ENV
             "$CLANG_BIN/clang" --version | head -2
             if [ ! -x "$CLANG_BIN/ld.lld" ]; then
-              echo "ld.lld not found in clang bin — installing lld package"
               pacman -S --noconfirm lld
             fi
           else
-            echo "No prebuilt clang found — installing system clang + lld as fallback"
+            echo "❌ No prebuilt clang — installing system clang + lld"
             pacman -S --noconfirm clang lld llvm
           fi
 
@@ -161,11 +143,9 @@ jobs:
           cd $GITHUB_WORKSPACE
           echo "Cloning ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_BRANCH }}"
           git clone --recursive ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_BRANCH }} device_kernel --depth=1
-
           if [[ -n "${{ env.DEFCONFIG_SOURCE }}" ]]; then
             wget ${{ env.DEFCONFIG_SOURCE }} -O device_kernel/arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           fi
-
           KVER=$(head -n 3 device_kernel/Makefile | grep -E 'VERSION|PATCHLEVEL' | awk '{print $3}' | paste -sd '.')
           echo "KERNEL_VERSION=$KVER" >> $GITHUB_ENV
           echo "Detected KERNEL_VERSION=$KVER"
@@ -199,27 +179,13 @@ jobs:
 
           if [[ "${{ env.PACK_METHOD }}" == "Anykernel3" ]]; then
             cd $GITHUB_WORKSPACE/device_kernel
-            if [[ -d "Anykernel3" ]]; then
-              echo "Found Anykernel3 in kernel!"
-            else
-              git clone ${{ env.AK3_SOURCE }} -b ${{ env.AK3_BRANCH }} Anykernel3 --depth=1
-            fi
+            if [[ -d "Anykernel3" ]]; then echo "Found Anykernel3 in kernel!"
+            else git clone ${{ env.AK3_SOURCE }} -b ${{ env.AK3_BRANCH }} Anykernel3 --depth=1; fi
           fi
           echo "PACK_METHOD=${{ env.PACK_METHOD }}" >> $GITHUB_ENV
 
-          # ---------- KernelSU ----------
           if [[ "${{ env.KERNELSU_METHOD }}" == "shell" ]]; then
             curl -sSL ${{ env.KERNELSU_SOURCE }} | bash -s ${{ env.KERNELSU_BRANCH }}
-          elif [[ "${{ env.KERNELSU_METHOD }}" == "manual" ]]; then
-            rm -rf KernelSU && rm -rf KernelSU-Next
-            git clone ${{ env.KERNELSU_SOURCE }} -b ${{ env.KERNELSU_BRANCH }} ${{ env.KERNELSU_NAME }}
-            ln -sf "$(realpath --relative-to="$GITHUB_WORKSPACE/device_kernel/drivers" "$GITHUB_WORKSPACE/device_kernel/${{ env.KERNELSU_NAME }}/kernel")" "kernelsu"
-            grep -q "kernelsu" "$GITHUB_WORKSPACE/device_kernel/drivers/Makefile" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> $GITHUB_WORKSPACE/device_kernel/drivers/Makefile
-            grep -q "source \"drivers/kernelsu/Kconfig\"" "$GITHUB_WORKSPACE/device_kernel/drivers/Kconfig" || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" "$GITHUB_WORKSPACE/device_kernel/drivers/Kconfig"
-          elif [[ "${{ env.KERNELSU_METHOD }}" == "only" ]]; then
-            rm -rf *KernelSU* && rm -rf drivers/kernelsu
-            git clone ${{ env.KERNELSU_SOURCE }} -b ${{ env.KERNELSU_BRANCH }} ${{ env.KERNELSU_NAME }}
-            ln -sf ../${{ env.KERNELSU_NAME }}/kernel drivers/kernelsu
           fi
           echo "KERNELSU_METHOD=${{ env.KERNELSU_METHOD }}" >> $GITHUB_ENV
 
@@ -230,12 +196,10 @@ jobs:
             echo "UPLOADNAME=-KSU" >> $GITHUB_ENV
           fi
 
-          # ---------- SUSFS ----------
           if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
             if [[ "${{ env.SUSFS_FIXED }}" == "true" ]]; then
               if [[ "${{ env.PATCHES_SOURCE }}" == *".git" ]]; then
-                echo "Do not set a full URL in PATCHES_SOURCE!"
-                exit 1
+                echo "Do not set a full URL in PATCHES_SOURCE!"; exit 1
               fi
               git clone https://github.com/${{ env.PATCHES_SOURCE }}.git -b ${{ env.PATCHES_BRANCH }} NonGKI_Kernel_Patches --depth=1
             fi
@@ -262,7 +226,7 @@ jobs:
                 if [ "$KERNEL" -lt 5 ] && [ "$PATCHLEVEL" -lt 14 ]; then
                   cp /tmp/Patches/extra_patches.sh ./
                   bash extra_patches.sh
-                  echo "Extra patches applied (4.14 < 5.14)."
+                  echo "Extra patches applied."
                 fi
                 if [[ "${{ env.KERNELSU_NAME }}" != "KernelSU-Next" ]]; then
                   cp /tmp/Patches/backport_patches.sh ./
@@ -270,25 +234,7 @@ jobs:
                   echo "Backport patches applied."
                 fi
               else
-                echo "normal_patches.sh not found!"
-                exit 1
-              fi
-            elif [[ "${{ env.HOOK_METHOD }}" == "vfs" ]]; then
-              if [[ -f "/tmp/Patches/vfs_hook_patches.sh" ]]; then
-                cp /tmp/Patches/vfs_hook_patches.sh device_kernel/
-                cd device_kernel
-                bash vfs_hook_patches.sh
-                if [ "$KERNEL" -lt 5 ] && [ "$PATCHLEVEL" -lt 14 ]; then
-                  cp /tmp/Patches/extra_patches.sh ./
-                  bash extra_patches.sh
-                fi
-                if [[ "${{ env.KERNELSU_NAME }}" != "KernelSU-Next" ]]; then
-                  cp /tmp/Patches/backport_patches.sh ./
-                  bash backport_patches.sh
-                fi
-              else
-                echo "vfs_hook_patches.sh not found!"
-                exit 1
+                echo "normal_patches.sh not found!"; exit 1
               fi
             fi
           fi
@@ -301,7 +247,7 @@ jobs:
           patch -p1 < 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch || true
 
           if [[ "${{ env.KERNELSU_NAME }}" == "KernelSU-Next" ]]; then
-            echo "KernelSU-Next detected, skipping KSU sus patch."
+            echo "KernelSU-Next detected."
           elif [[ "${{ env.KERNELSU_SUS_PATCH }}" == "true" ]]; then
             cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./${{ env.KERNELSU_NAME }}
             cd ${{ env.KERNELSU_NAME }}
@@ -313,13 +259,10 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
           mapfile -t REJ_FILES < <(find . -type f -name "*.rej")
-          if [ ${#REJ_FILES[@]} -eq 0 ]; then
-            echo "No .rej files."
+          if [ ${#REJ_FILES[@]} -eq 0 ]; then echo "No .rej files."
           else
             for CAT_REJ in "${REJ_FILES[@]}"; do
-              echo "Found .rej: $CAT_REJ"
-              cat "$CAT_REJ"
-              echo "==========EOF=========="
+              echo "Found .rej: $CAT_REJ"; cat "$CAT_REJ"; echo "==========EOF=========="
             done
             exit 1
           fi
@@ -334,7 +277,7 @@ jobs:
             patch -p1 < "$PATCH_FILE" || true
             echo "Applied fixed patch: $PATCH_FILE"
           else
-            echo "Fixed patch $PATCH_FILE not found in NonGKI_Kernel_Patches, skipping."
+            echo "Fixed patch $PATCH_FILE not found, skipping."
           fi
 
       - name: Setup ccache
@@ -344,39 +287,45 @@ jobs:
           max-size: 2G
           create-symlink: true
 
+      # ================================================
+      # YAHI HAI ASLI FIX
+      # ================================================
       - name: Build Kernel
         run: |
-          # असली clang bin को फिर से PATH में डालो (prebuilt या system)
+          # 1. Clang bin → PATH
           if [ -n "${{ env.CLANG_BIN_DIR }}" ] && [ -x "${{ env.CLANG_BIN_DIR }}/clang" ]; then
             export PATH="${{ env.CLANG_BIN_DIR }}:$PATH"
-          else
-            # system clang fallback — सीधे /usr/bin में है
-            export PATH="/usr/bin:$PATH"
           fi
+
+          # 2. GCC cross binutils → PATH (aarch64-linux-android-as/elfedit etc.)
+          export PATH="$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
 
           cd $GITHUB_WORKSPACE/device_kernel/
 
           echo "=== Sanity check ==="
           echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-          echo "PATH=$PATH"
-          echo "which clang: $(command -v clang || echo MISSING)"
-          echo "which ld.lld: $(command -v ld.lld || echo MISSING)"
-          clang --version 2>&1 | head -3 || true
-          ld.lld --version 2>&1 | head -2 || true
+          echo "clang:                          $(command -v clang || echo MISSING)"
+          echo "aarch64-linux-android-as:       $(command -v aarch64-linux-android-as || echo MISSING)"
+          echo "aarch64-linux-android-elfedit:  $(command -v aarch64-linux-android-elfedit || echo MISSING)"
+          echo "aarch64-linux-android-ld:       $(command -v aarch64-linux-android-ld || echo MISSING)"
+          echo "ld.lld:                         $(command -v ld.lld || echo MISSING)"
+          clang --version 2>&1 | head -3
+          ld.lld --version 2>&1 | head -1
+
+          # 3. CC को --target दो ताकि clang ARM64 के लिए compile करे
+          CC_CMD="ccache clang --target=aarch64-linux-gnu"
 
           echo "Building kernel ${{ env.KERNEL_VERSION }} for ${{ env.DEVICE_NAME }}"
           make O=out ARCH=arm64 \
-               CC="ccache clang" \
+               CC="$CC_CMD" \
                LD="ld.lld" \
-               CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
                CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
                ${{ env.DEFCONFIG_NAME }}
 
           make -j$(nproc --all) O=out ARCH=arm64 \
-               CC="ccache clang" \
+               CC="$CC_CMD" \
                LD="ld.lld" \
-               CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
                CROSS_COMPILE_ARM32="arm-linux-androideabi-"
 
@@ -394,14 +343,9 @@ jobs:
             sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' Anykernel3/anykernel.sh
           fi
 
-          if [[ -f "$IMAGE_DIR/Image.gz-dtb" ]]; then
-            cp -fp "$IMAGE_DIR/Image.gz-dtb" tmp
-          elif [[ -f "$IMAGE_DIR/Image.gz" ]]; then
-            cp -fp "$IMAGE_DIR/Image.gz" tmp
-          elif [[ -f "$IMAGE_DIR/Image" ]]; then
-            gzip -c "$IMAGE_DIR/Image" > "$IMAGE_DIR/Image.gz"
-            cp -fp "$IMAGE_DIR/Image.gz" tmp
-          fi
+          if [[ -f "$IMAGE_DIR/Image.gz-dtb" ]]; then cp -fp "$IMAGE_DIR/Image.gz-dtb" tmp
+          elif [[ -f "$IMAGE_DIR/Image.gz" ]]; then cp -fp "$IMAGE_DIR/Image.gz" tmp
+          elif [[ -f "$IMAGE_DIR/Image" ]]; then gzip -c "$IMAGE_DIR/Image" > "$IMAGE_DIR/Image.gz"; cp -fp "$IMAGE_DIR/Image.gz" tmp; fi
 
           [[ -f "$IMAGE_DIR/dtbo.img" ]] && cp -fp "$IMAGE_DIR/dtbo.img" tmp
           [[ -f "$IMAGE_DIR/dtb" ]] && cp -fp "$IMAGE_DIR/dtb" tmp
