@@ -192,20 +192,135 @@ jobs:
           fi
 
           cd $GITHUB_WORKSPACE/device_kernel/
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch ./
-          patch -p1 < 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch || true
 
-          if [[ "${{ env.KERNELSU_NAME }}" != "KernelSU-Next" ]] && [[ "${{ env.KERNELSU_SUS_PATCH }}" == "true" ]]; then
-            cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./${{ env.KERNELSU_NAME }}
-            cd ${{ env.KERNELSU_NAME }} && patch -p1 < 10_enable_susfs_for_ksu.patch || true
-            cd ..
+          # ============================================================
+          # 🎯 SUSFS CORE PATCH — STRICT: fail if any hunk fails
+          # ============================================================
+          echo "=== Applying SUSFS core patch: 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch ==="
+          SUSFS_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch"
+          if [ ! -f "$SUSFS_PATCH" ]; then
+            echo "❌ SUSFS core patch file not found: $SUSFS_PATCH"
+            exit 1
+          fi
+          cp "$SUSFS_PATCH" ./
+          PATCH_NAME=$(basename "$SUSFS_PATCH")
+          if patch -p1 < "$PATCH_NAME"; then
+            echo "✅ SUSFS core patch applied successfully (no failed hunks)."
+          else
+            echo "❌ SUSFS core patch FAILED to apply."
+            echo "   Look for .rej files and fix the kernel source or patch."
+            exit 1
           fi
 
+          # ============================================================
+          # KernelSU SUSFS-enable patch (optional, but log failures)
+          # ============================================================
+          if [[ "${{ env.KERNELSU_NAME }}" != "KernelSU-Next" ]] && [[ "${{ env.KERNELSU_SUS_PATCH }}" == "true" ]]; then
+            KSU_SUS_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            if [ -f "$KSU_SUS_PATCH" ]; then
+              cp "$KSU_SUS_PATCH" ./${{ env.KERNELSU_NAME }}/
+              cd ${{ env.KERNELSU_NAME }}
+              echo "=== Applying KernelSU SUSFS-enable patch ==="
+              if patch -p1 < 10_enable_susfs_for_ksu.patch; then
+                echo "✅ KernelSU SUSFS-enable patch applied."
+              else
+                echo "❌ KernelSU SUSFS-enable patch FAILED."
+                exit 1
+              fi
+              cd ..
+            fi
+          fi
+
+          # ============================================================
+          # Extra non-GKI patch (best-effort, but fail on .rej later)
+          # ============================================================
           PATCH_FILE="susfs_patch_to_${{ env.KERNEL_VERSION }}.patch"
           if [ -f "NonGKI_Kernel_Patches/Patches/Patch/$PATCH_FILE" ]; then
             cp "NonGKI_Kernel_Patches/Patches/Patch/$PATCH_FILE" ./
-            patch -p1 < "$PATCH_FILE" || true
+            echo "=== Applying extra patch: $PATCH_FILE ==="
+            if patch -p1 < "$PATCH_FILE"; then
+              echo "✅ Extra patch applied."
+            else
+              echo "⚠️ Extra patch had failures (rejects will be checked in verification step)."
+            fi
           fi
+
+      # ============================================================
+      # 🎯 NEW STEP: Verify SUSFS patch fully applied BEFORE build
+      # ============================================================
+      - name: Verify SUSFS patch fully applied (fail early if not)
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel/
+
+          echo "=============================================="
+          echo "  PATCH VERIFICATION — will fail build early  "
+          echo "=============================================="
+
+          # ---- 1) No .rej files in SUSFS-relevant areas ----
+          echo ""
+          echo "--- Checking for reject files in fs/ and include/linux/ ---"
+          REJS=$(find fs include/linux -name "*.rej" -type f 2>/dev/null || true)
+          if [ -n "$REJS" ]; then
+            echo ""
+            echo "❌ PATCH FAILED: Reject files found:"
+            echo "$REJS"
+            echo ""
+            for rej in $REJS; do
+              echo "===== $rej ====="
+              cat "$rej"
+              echo ""
+            done
+            echo "❌ SUSFS patch did not fully apply."
+            echo "   Please fix the kernel source or update the patch and try again."
+            exit 1
+          fi
+          echo "✅ No reject files in fs/ or include/linux/."
+
+          # ---- 2) Critical SUSFS symbols must be defined ----
+          echo ""
+          echo "--- Checking critical SUSFS symbols ---"
+          MISSING=0
+
+          if ! grep -rq "define DEFAULT_KSU_MNT_ID" . 2>/dev/null; then
+            echo "❌ DEFAULT_KSU_MNT_ID is NOT defined anywhere"
+            MISSING=1
+          else
+            echo "✅ DEFAULT_KSU_MNT_ID is defined"
+          fi
+
+          if ! grep -rq "define VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT" . 2>/dev/null; then
+            echo "❌ VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT is NOT defined anywhere"
+            MISSING=1
+          else
+            echo "✅ VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT is defined"
+          fi
+
+          if ! grep -rq "is_mnt_ksu_unshared" fs/namespace.c 2>/dev/null; then
+            echo "❌ is_mnt_ksu_unshared is NOT present in fs/namespace.c"
+            MISSING=1
+          else
+            echo "✅ is_mnt_ksu_unshared is present in fs/namespace.c"
+          fi
+
+          if [ "$MISSING" -eq 1 ]; then
+            echo ""
+            echo "❌ Critical SUSFS symbols missing — build would fail with 'undeclared identifier' errors."
+            echo "   Aborting BEFORE compilation to save time."
+            exit 1
+          fi
+
+          # ---- 3) Sanity: fs/namespace.c should include susfs.h ----
+          echo ""
+          echo "--- Checking fs/namespace.c includes susfs header ---"
+          if ! grep -q "linux/susfs" fs/namespace.c 2>/dev/null; then
+            echo "⚠️ fs/namespace.c does NOT include susfs header — may still fail"
+            echo "   (continuing; the symbol check above is the stronger test)"
+          else
+            echo "✅ fs/namespace.c includes susfs header"
+          fi
+
+          echo ""
+          echo "🎉 SUSFS patch verification PASSED — safe to build."
 
       # ============================================================
       # 🎯 FIX 0: Ensure kernel/Kconfig is sourced (CRITICAL for CONFIG_KSU_SUSFS)
@@ -214,7 +329,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
 
-          # If SUSFS patch created kernel/Kconfig but no one sources it, add source
           if [ -f kernel/Kconfig ] && grep -q "KSU_SUSFS" kernel/Kconfig; then
             if ! grep -q 'source "kernel/Kconfig"' Kconfig 2>/dev/null; then
               echo "→ Adding 'source kernel/Kconfig' to top-level Kconfig"
@@ -225,13 +339,10 @@ jobs:
             fi
           else
             echo "→ kernel/Kconfig not found or no KSU_SUSFS, checking other locations..."
-            # Try to find where the SUSFS patch put the config
             SUSFS_KCONFIG=$(grep -rl "menuconfig KSU_SUSFS\|config KSU_SUSFS" --include="Kconfig*" . 2>/dev/null | head -1)
             if [ -n "$SUSFS_KCONFIG" ]; then
               echo "✓ SUSFS config found in: $SUSFS_KCONFIG"
-              # Check if it's sourced
               DIR=$(dirname "$SUSFS_KCONFIG")
-              BASE=$(basename "$SUSFS_KCONFIG")
               if [ "$DIR" != "." ] && ! grep -q "source \"$SUSFS_KCONFIG\"" Kconfig 2>/dev/null; then
                 echo "→ Not sourced, adding to top-level Kconfig"
                 echo "source \"$SUSFS_KCONFIG\"" >> Kconfig
@@ -253,7 +364,6 @@ jobs:
           cd $GITHUB_WORKSPACE/device_kernel/
 
           if grep -q "susfs_is_current_app_uid\|STATX_SUS_KSTAT" fs/stat.c 2>/dev/null; then
-            # Remove old guarded includes
             grep -v '<linux/susfs.h>' fs/stat.c > fs/stat.c.tmp1 || true
             grep -v '<linux/susfs_def.h>' fs/stat.c.tmp1 > fs/stat.c.tmp2 || true
             rm -f fs/stat.c.tmp1
@@ -316,7 +426,6 @@ jobs:
             exit 0
           fi
 
-          # ---- 1) Inject FUSE_SUPER_MAGIC fallback + magic.h ----
           if grep -q "FUSE_SUPER_MAGIC" fs/readdir.c && ! grep -q 'linux/magic\.h' fs/readdir.c; then
             LAST_INC=$(grep -n '^#include' fs/readdir.c | tail -1 | cut -d: -f1)
             if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
@@ -332,14 +441,10 @@ jobs:
             echo "[readdir.c] magic.h + FUSE_SUPER_MAGIC fallback injected"
           fi
 
-          # ---- 2) Unconditional susfs.h + stubs ----
           if grep -q "susfs_is_inode_sus_path\|susfs_get_data_path" fs/readdir.c; then
-            # Remove any guarded includes
             grep -v '<linux/susfs.h>' fs/readdir.c > fs/readdir.c.tmp1 || true
-
             LAST_INC=$(grep -n '^#include' fs/readdir.c.tmp1 | tail -1 | cut -d: -f1)
             if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
-
             {
               head -n "$LAST_INC" fs/readdir.c.tmp1
               echo ""
@@ -356,14 +461,11 @@ jobs:
             echo "[readdir.c] Unconditional susfs.h + stubs injected"
           fi
 
-          # ---- 3) Insert struct inode declaration ----
           python3 - <<'PYEOF'
           import re
-
           path = 'fs/readdir.c'
           with open(path) as f:
               lines = f.readlines()
-
           NEW = '\tstruct inode *inode;\n'
           out = []
           i = 0
@@ -382,7 +484,6 @@ jobs:
                       print(f'[readdir.c] Inserted struct inode *inode; before line {i+1}')
               out.append(line)
               i += 1
-
           with open(path, 'w') as f:
               f.writelines(out)
           print(f'[readdir.c] Total insertions: {inserted}')
@@ -420,19 +521,20 @@ jobs:
             echo "✅ CONFIG_KSU_SUSFS=y found in .config"
             grep "^CONFIG_KSU_SUSFS" out/.config
           else
-            echo "❌ CONFIG_KSU_SUSFS NOT in .config - forcing it"
-            # Force through scripts/config (writes raw line; if Kconfig is right, it will be picked up)
+            echo "❌ CONFIG_KSU_SUSFS NOT in .config"
+            # Since we verified the patch is fully applied, Kconfig must work.
+            # Force it anyway as fallback.
+            echo "→ Forcing SUSFS config (patch was verified, so this should stick)..."
             for opt in KSU_SUSFS KSU_SUSFS_HAS_MAGIC_MOUNT KSU_SUSFS_SUS_PATH KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT; do
               echo "CONFIG_$opt=y" >> out/.config
             done
-            # Run olddefconfig to regenerate auto.conf
             make O=out ARCH=arm64 olddefconfig
-            # Re-check
             if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
               echo "✅ CONFIG_KSU_SUSFS now set after force"
             else
-              echo "⚠️ CONFIG_KSU_SUSFS STILL missing — SUSFS may not work at runtime"
-              echo "Kconfig tree may not include SUSFS symbols. Build will still succeed via stubs."
+              echo "❌ CONFIG_KSU_SUSFS STILL missing after force — Kconfig tree is broken."
+              echo "   Aborting before build to avoid wasted time."
+              exit 1
             fi
           fi
           echo "=============================================="
