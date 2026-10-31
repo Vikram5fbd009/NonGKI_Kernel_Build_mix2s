@@ -9,6 +9,7 @@ on:
       - '.github/workflows/**'
 
 env:
+  PYTHON_VERSION: "3"
   PACK_METHOD: "Anykernel3"
   KERNELSU_METHOD: "shell"
   PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Build_2nd"
@@ -103,6 +104,7 @@ jobs:
           git clone --recursive ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_BRANCH }} device_kernel --depth=1
           KVER=$(head -n 3 device_kernel/Makefile | grep -E 'VERSION|PATCHLEVEL' | awk '{print $3}' | paste -sd '.')
           echo "KERNEL_VERSION=$KVER" >> $GITHUB_ENV
+          echo "Detected KERNEL_VERSION=$KVER"
 
       - name: DEFCONFIG (KSU + SUSFS + Storage + Media)
         run: |
@@ -204,27 +206,45 @@ jobs:
             patch -p1 < "$PATCH_FILE" || true
           fi
 
+      # ============================================================
+      # 🎯 FIX 1: fs/stat.c — dono includes (susfs.h + susfs_def.h) ensure
+      # ============================================================
       - name: Fix fs/stat.c (build error) with pure shell
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
 
           if grep -q "susfs_is_current_app_uid\|STATX_SUS_KSTAT" fs/stat.c 2>/dev/null; then
+            NEEDS_INJECT=0
+            if ! grep -q '<linux/susfs.h>' fs/stat.c; then
+              NEEDS_INJECT=1
+            fi
             if ! grep -q '<linux/susfs_def.h>' fs/stat.c; then
-              LAST_INC=$(grep -n '^#include' fs/stat.c | tail -1 | cut -d: -f1)
+              NEEDS_INJECT=1
+            fi
+
+            if [ "$NEEDS_INJECT" -eq 1 ]; then
+              # Purani SUSFS include lines hatao (duplicate na bane)
+              grep -v '<linux/susfs.h>' fs/stat.c > fs/stat.c.tmp1 || true
+              grep -v '<linux/susfs_def.h>' fs/stat.c.tmp1 > fs/stat.c.tmp2 || true
+              rm -f fs/stat.c.tmp1
+
+              LAST_INC=$(grep -n '^#include' fs/stat.c.tmp2 | tail -1 | cut -d: -f1)
               if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
+
               {
-                head -n "$LAST_INC" fs/stat.c
+                head -n "$LAST_INC" fs/stat.c.tmp2
                 echo ""
                 echo "#ifdef CONFIG_KSU_SUSFS"
                 echo "#include <linux/susfs.h>"
                 echo "#include <linux/susfs_def.h>"
                 echo "#endif"
-                tail -n +$((LAST_INC + 1)) fs/stat.c
+                tail -n +$((LAST_INC + 1)) fs/stat.c.tmp2
               } > fs/stat.c.new
+              rm -f fs/stat.c.tmp2
               mv fs/stat.c.new fs/stat.c
-              echo "[stat.c] SUSFS includes injected after line $LAST_INC"
+              echo "[stat.c] SUSFS includes freshly injected (susfs.h + susfs_def.h)"
             else
-              echo "[stat.c] SUSFS includes already present"
+              echo "[stat.c] SUSFS includes already present (both)"
             fi
           else
             echo "[stat.c] No susfs code, skipping"
@@ -256,9 +276,94 @@ jobs:
             sed -i '3i #endif' fs/namespace.c
           fi
 
-          echo "=== Verify ==="
+          echo "=== Verify stat.c ==="
           grep -n "susfs.h\|susfs_def.h" fs/stat.c | head -5 || true
-          grep -n "STATX_SUS_KSTAT" include/linux/susfs_def.h || true
+          grep -n "STATX_SUS_KSTAT" include/linux/susfs_def.h | head -5 || true
+
+      # ============================================================
+      # 🎯 FIX 2: fs/readdir.c — FUSE_SUPER_MAGIC + susfs funcs + inode decl
+      # ============================================================
+      - name: Fix fs/readdir.c (build error) with pure shell
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel/
+
+          if [ ! -f fs/readdir.c ]; then
+            echo "[readdir.c] File missing, skipping"
+            exit 0
+          fi
+
+          # ---- 1) Add #include <linux/magic.h> (for FUSE_SUPER_MAGIC) ----
+          if grep -q "FUSE_SUPER_MAGIC" fs/readdir.c && ! grep -q 'linux/magic\.h' fs/readdir.c; then
+            LAST_INC=$(grep -n '^#include' fs/readdir.c | tail -1 | cut -d: -f1)
+            if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
+            {
+              head -n "$LAST_INC" fs/readdir.c
+              echo "#include <linux/magic.h>"
+              tail -n +$((LAST_INC + 1)) fs/readdir.c
+            } > fs/readdir.c.new
+            mv fs/readdir.c.new fs/readdir.c
+            echo "[readdir.c] Injected #include <linux/magic.h>"
+          else
+            echo "[readdir.c] magic.h OK or FUSE_SUPER_MAGIC not used"
+          fi
+
+          # ---- 2) Add #include <linux/susfs.h> ----
+          if grep -q "susfs_is_inode_sus_path\|susfs_get_data_path" fs/readdir.c && ! grep -q 'linux/susfs\.h' fs/readdir.c; then
+            LAST_INC=$(grep -n '^#include' fs/readdir.c | tail -1 | cut -d: -f1)
+            if [ -z "$LAST_INC" ]; then LAST_INC=0; fi
+            {
+              head -n "$LAST_INC" fs/readdir.c
+              echo "#ifdef CONFIG_KSU_SUSFS"
+              echo "#include <linux/susfs.h>"
+              echo "#endif"
+              tail -n +$((LAST_INC + 1)) fs/readdir.c
+            } > fs/readdir.c.new
+            mv fs/readdir.c.new fs/readdir.c
+            echo "[readdir.c] Injected #include <linux/susfs.h>"
+          else
+            echo "[readdir.c] susfs.h OK or susfs funcs not used"
+          fi
+
+          # ---- 3) Insert "struct inode *inode;" before every unguarded "inode = ilookup(...)" ----
+          python3 - <<'PYEOF'
+          import re, sys
+
+          path = 'fs/readdir.c'
+          with open(path) as f:
+              lines = f.readlines()
+
+          NEW = '\tstruct inode *inode;\n'
+          out = []
+          i = 0
+          inserted = 0
+          while i < len(lines):
+              line = lines[i]
+              if 'inode = ilookup(buf->sb, ino)' in line:
+                  has_decl = False
+                  for j in range(max(0, i - 40), i):
+                      if 'struct inode *inode' in lines[j]:
+                          has_decl = True
+                          break
+                  if not has_decl:
+                      out.append(NEW)
+                      inserted += 1
+                      print(f'[readdir.c] Inserted struct inode *inode; before line {i+1}')
+              out.append(line)
+              i += 1
+
+          with open(path, 'w') as f:
+              f.writelines(out)
+
+          print(f'[readdir.c] Total insertions: {inserted}')
+          PYEOF
+
+          # ---- Verify ----
+          echo "=== Verify readdir.c ==="
+          grep -n "linux/magic.h\|linux/susfs.h" fs/readdir.c | head -5 || true
+          echo "--- struct inode decl count ---"
+          grep -c "struct inode \*inode" fs/readdir.c || true
+          echo "--- ilookup occurrences ---"
+          grep -n "inode = ilookup" fs/readdir.c || true
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
