@@ -126,7 +126,7 @@ jobs:
 
           echo "Detected CLANG_BIN=$CLANG_BIN"
           if [ -x "$CLANG_BIN/clang" ]; then
-            echo "✅ Using prebuilt clang at $CLANG_BIN"
+            echo "Using prebuilt clang at $CLANG_BIN"
             echo "$CLANG_BIN" >> $GITHUB_PATH
             echo "CLANG_BIN_DIR=$CLANG_BIN" >> $GITHUB_ENV
             "$CLANG_BIN/clang" --version | head -2
@@ -134,7 +134,7 @@ jobs:
               pacman -S --noconfirm lld
             fi
           else
-            echo "❌ No prebuilt clang — installing system clang + lld"
+            echo "No prebuilt clang — installing system clang + lld"
             pacman -S --noconfirm clang lld llvm
           fi
 
@@ -287,45 +287,43 @@ jobs:
           max-size: 2G
           create-symlink: true
 
-      # ================================================
-      # YAHI HAI ASLI FIX
-      # ================================================
+      # ============================================
+      # ASLI FIX: --target हटाया, CLANG_TRIPLE make var
+      # ============================================
       - name: Build Kernel
         run: |
-          # 1. Clang bin → PATH
+          # 1. Real clang bin → PATH
           if [ -n "${{ env.CLANG_BIN_DIR }}" ] && [ -x "${{ env.CLANG_BIN_DIR }}/clang" ]; then
             export PATH="${{ env.CLANG_BIN_DIR }}:$PATH"
           fi
 
-          # 2. GCC cross binutils → PATH (aarch64-linux-android-as/elfedit etc.)
+          # 2. GCC cross binutils → PATH (aarch64-linux-android-as etc.)
           export PATH="$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
 
           cd $GITHUB_WORKSPACE/device_kernel/
 
           echo "=== Sanity check ==="
           echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-          echo "clang:                          $(command -v clang || echo MISSING)"
-          echo "aarch64-linux-android-as:       $(command -v aarch64-linux-android-as || echo MISSING)"
-          echo "aarch64-linux-android-elfedit:  $(command -v aarch64-linux-android-elfedit || echo MISSING)"
-          echo "aarch64-linux-android-ld:       $(command -v aarch64-linux-android-ld || echo MISSING)"
-          echo "ld.lld:                         $(command -v ld.lld || echo MISSING)"
-          clang --version 2>&1 | head -3
+          echo "clang:                     $(command -v clang || echo MISSING)"
+          echo "aarch64-linux-android-as:  $(command -v aarch64-linux-android-as || echo MISSING)"
+          echo "aarch64-linux-android-elfedit: $(command -v aarch64-linux-android-elfedit || echo MISSING)"
+          echo "ld.lld:                    $(command -v ld.lld || echo MISSING)"
+          clang --version 2>&1 | head -1
           ld.lld --version 2>&1 | head -1
-
-          # 3. CC को --target दो ताकि clang ARM64 के लिए compile करे
-          CC_CMD="ccache clang --target=aarch64-linux-gnu"
 
           echo "Building kernel ${{ env.KERNEL_VERSION }} for ${{ env.DEVICE_NAME }}"
           make O=out ARCH=arm64 \
-               CC="$CC_CMD" \
+               CC="ccache clang" \
                LD="ld.lld" \
+               CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
                CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
                ${{ env.DEFCONFIG_NAME }}
 
           make -j$(nproc --all) O=out ARCH=arm64 \
-               CC="$CC_CMD" \
+               CC="ccache clang" \
                LD="ld.lld" \
+               CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
                CROSS_COMPILE_ARM32="arm-linux-androideabi-"
 
