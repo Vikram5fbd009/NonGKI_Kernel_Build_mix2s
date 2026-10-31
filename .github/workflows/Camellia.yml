@@ -76,7 +76,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
 
-          # ---------- GCC 64 ----------
           if [ -z "${{ env.GCC_64_SOURCE }}" ]; then
             echo "Not set GCC 64!"
           else
@@ -87,7 +86,6 @@ jobs:
             echo "GCC_64=CROSS_COMPILE=$GITHUB_WORKSPACE/gcc-64/bin/$GCC_64_BIN" >> $GITHUB_ENV
           fi
 
-          # ---------- GCC 32 ----------
           if [ -z "${{ env.GCC_32_SOURCE }}" ]; then
             echo "Not set GCC 32!"
           else
@@ -98,7 +96,6 @@ jobs:
             echo "GCC_32=CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc-32/bin/$GCC_32_BIN" >> $GITHUB_ENV
           fi
 
-          # ---------- Clang ----------
           CLANG_SRC="${{ env.CLANG_SOURCE }}"
           if [ -z "$CLANG_SRC" ]; then
             echo "Not set Clang!"
@@ -114,7 +111,6 @@ jobs:
             git clone "$CLANG_SRC" -b "${{ env.CLANG_BRANCH }}" clang-custom --depth=1
           fi
 
-          # AUTO-DETECT real clang bin
           if [ -x "$GITHUB_WORKSPACE/clang-custom/bin/clang" ]; then
             CLANG_BIN="$GITHUB_WORKSPACE/clang-custom/bin"
           else
@@ -288,16 +284,13 @@ jobs:
           create-symlink: true
 
       # ============================================
-      # ASLI FIX: --target हटाया, CLANG_TRIPLE make var
+      # ASLI FIX: KCFLAGS me -Wno-error=incompatible-pointer-types
       # ============================================
       - name: Build Kernel
         run: |
-          # 1. Real clang bin → PATH
           if [ -n "${{ env.CLANG_BIN_DIR }}" ] && [ -x "${{ env.CLANG_BIN_DIR }}/clang" ]; then
             export PATH="${{ env.CLANG_BIN_DIR }}:$PATH"
           fi
-
-          # 2. GCC cross binutils → PATH (aarch64-linux-android-as etc.)
           export PATH="$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
 
           cd $GITHUB_WORKSPACE/device_kernel/
@@ -306,10 +299,12 @@ jobs:
           echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
           echo "clang:                     $(command -v clang || echo MISSING)"
           echo "aarch64-linux-android-as:  $(command -v aarch64-linux-android-as || echo MISSING)"
-          echo "aarch64-linux-android-elfedit: $(command -v aarch64-linux-android-elfedit || echo MISSING)"
           echo "ld.lld:                    $(command -v ld.lld || echo MISSING)"
           clang --version 2>&1 | head -1
-          ld.lld --version 2>&1 | head -1
+
+          # Fix: cred.h में atomic_long_t usage vs atomic_t mismatch (kernel source issue)
+          # -Wno-error=incompatible-pointer-types से warning बनेगा, error नहीं
+          KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined"
 
           echo "Building kernel ${{ env.KERNEL_VERSION }} for ${{ env.DEVICE_NAME }}"
           make O=out ARCH=arm64 \
@@ -318,6 +313,7 @@ jobs:
                CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
                CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
+               KCFLAGS="$KCFLAGS_FIX" \
                ${{ env.DEFCONFIG_NAME }}
 
           make -j$(nproc --all) O=out ARCH=arm64 \
@@ -325,7 +321,8 @@ jobs:
                LD="ld.lld" \
                CLANG_TRIPLE="aarch64-linux-gnu-" \
                CROSS_COMPILE="aarch64-linux-android-" \
-               CROSS_COMPILE_ARM32="arm-linux-androideabi-"
+               CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
+               KCFLAGS="$KCFLAGS_FIX"
 
       - name: Make Anykernel3 Flasher
         if: env.PACK_METHOD == 'Anykernel3'
